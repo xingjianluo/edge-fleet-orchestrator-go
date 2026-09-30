@@ -43,7 +43,7 @@ func TestDeployIdempotent(t *testing.T) {
 	if r1.Seq != r2.Seq {
 		t.Fatalf("idempotent deploy produced different seq: %d vs %d", r1.Seq, r2.Seq)
 	}
-	hist, _ := cp.History("tenant-a", "dev-1")
+	hist, _ := cp.History("tenant-a", "", "dev-1")
 	if len(hist) != 1 {
 		t.Fatalf("expected 1 history record, got %d", len(hist))
 	}
@@ -86,7 +86,7 @@ func TestRollbackReproducible(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	cur, _ := cp.CurrentVersion("tenant-a", "dev-1")
+	cur, _ := cp.CurrentVersion("tenant-a", "", "dev-1")
 	t.Logf("输入: 历史 v1.0.0->v1.1.0->v2.0.0, 回滚到 v1.0.0; 判定依据: 回滚记录复用历史 Spec 且当前版本为 v1.0.0")
 	t.Logf("结果: rollbackOf=%s current=%s", rec.RollbackOf, cur)
 	if cur != "v1.0.0" || rec.RollbackOf != "v1.0.0" {
@@ -151,10 +151,15 @@ func TestConcurrentDeploysDeterministic(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			// 半数重复同一幂等键，半数各自独立键：并发下同键不得产生多条记录。
+			// 半数重复同一幂等键、半数另一个键；两个键内容不同（版本不同）：
+			// 并发下每个键不得产生多条记录；同键必须返回同一 Seq。
 			key := fmt.Sprintf("key-%d", i%2)
+			ver := "v1.0.0"
+			if i%2 == 1 {
+				ver = "v2.0.0"
+			}
 			_, errs[i] = cp.Deploy(fleet.DeploymentSpec{TenantID: "tenant-a", ClusterID: "cluster-1",
-				DeviceID: "dev-1", Artifact: artifact("v1.0.0"), IdempotencyKey: key})
+				DeviceID: "dev-1", Artifact: artifact(ver), IdempotencyKey: key})
 		}(i)
 	}
 	wg.Wait()
@@ -163,20 +168,22 @@ func TestConcurrentDeploysDeterministic(t *testing.T) {
 			t.Fatalf("deploy %d: %v", i, err)
 		}
 	}
-	hist, _ := cp.History("tenant-a", "dev-1")
-	t.Logf("输入: %d 并发下发、2 个幂等键; 判定依据: 历史应恰为 2 条且 Seq 唯一, 实际 %d 条", n, len(hist))
+	hist, _ := cp.History("tenant-a", "", "dev-1")
+	t.Logf("输入: %d 并发下发、2 个幂等键（内容不同）; 判定依据: 历史应恰为 2 条且 Seq 唯一, 实际 %d 条", n, len(hist))
 	if len(hist) != 2 {
 		t.Fatalf("expected 2 records, got %d", len(hist))
 	}
 	seen := map[int64]bool{}
+	versions := map[string]bool{}
 	for _, h := range hist {
 		if seen[h.Seq] {
 			t.Fatalf("duplicate seq %d", h.Seq)
 		}
 		seen[h.Seq] = true
+		versions[h.Spec.Artifact.Version] = true
 	}
-	cur, _ := cp.CurrentVersion("tenant-a", "dev-1")
-	if cur != "v1.0.0" {
-		t.Fatalf("unexpected current version %q", cur)
+	// 最终版本由调度顺序决定（并发不做额外保证），但两种内容都必须恰好生效一次。
+	if !versions["v1.0.0"] || !versions["v2.0.0"] {
+		t.Fatalf("expected both versions to apply once, got %v", versions)
 	}
 }
