@@ -25,7 +25,7 @@ func newEnv(t *testing.T) (*controlplane.ControlPlane, *edge.Store, *edge.Gatewa
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	gw := edge.NewGateway("tenant-a", cp, st)
+	gw := edge.NewGateway("tenant-a", "cluster-1", cp, st)
 	dev := edge.NewDevice("dev-1", caps)
 	return cp, st, gw, dev, path
 }
@@ -38,7 +38,7 @@ func TestOfflineBufferAndReconnectResume(t *testing.T) {
 			t.Fatalf("report %d: %v", i, err)
 		}
 	}
-	v, ok, _ := cp.State("tenant-a", "dev-1", "temperature")
+	v, ok, _ := cp.State("tenant-a", "cluster-1", "dev-1", "temperature")
 	t.Logf("输入: 断网期间上报 5 条; 判定依据: 控制面应无数据, 实际 ok=%v value=%q", ok, v)
 	if ok {
 		t.Fatalf("control plane should have no data while offline, got %q", v)
@@ -48,7 +48,7 @@ func TestOfflineBufferAndReconnectResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	v, ok, _ = cp.State("tenant-a", "dev-1", "temperature")
+	v, ok, _ = cp.State("tenant-a", "cluster-1", "dev-1", "temperature")
 	t.Logf("输入: 重连续传; 判定依据: 确认位点=5 且最终值为位点最大的 %q, 实际 acked=%d value=%q", "24", acked, v)
 	if acked != 5 || !ok || v != "24" {
 		t.Fatalf("expected acked=5 value=24, got acked=%d value=%q", acked, v)
@@ -63,25 +63,28 @@ func TestDuplicateAndOutOfOrder(t *testing.T) {
 		dev.Emit("mode", "b"), // seq2
 		dev.Emit("mode", "c"), // seq3
 	}
+	for i := range recs {
+		recs[i].ClusterID = "cluster-1"
+	}
 	batch := []fleet.Telemetry{recs[2], recs[0], recs[1], recs[0], recs[2]} // 乱序+重复
 	cp1, err := cp.Ingest("tenant-a", batch)
 	if err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
-	v, _, _ := cp.State("tenant-a", "dev-1", "mode")
-	t.Logf("输入: 乱序[3,1,2]+重复[1,3]; 判定依据: 位点大者胜应为 %q, 连续位点应推进到 3, 实际 value=%q acked=%d", "c", v, cp1.AckedSeq)
-	if v != "c" || cp1.AckedSeq != 3 {
-		t.Fatalf("expected value=c acked=3, got value=%q acked=%d", v, cp1.AckedSeq)
+	v, _, _ := cp.State("tenant-a", "cluster-1", "dev-1", "mode")
+	t.Logf("输入: 乱序[3,1,2]+重复[1,3]; 判定依据: 位点大者胜应为 %q, 连续位点应推进到 3, 实际 value=%q acked=%d", "c", v, cp1.Checkpoint.AckedSeq)
+	if v != "c" || cp1.Checkpoint.AckedSeq != 3 {
+		t.Fatalf("expected value=c acked=3, got value=%q acked=%d", v, cp1.Checkpoint.AckedSeq)
 	}
 	// 重复上报整批：不得改变结果。
 	cp2, err := cp.Ingest("tenant-a", batch)
 	if err != nil {
 		t.Fatalf("re-ingest: %v", err)
 	}
-	v2, _, _ := cp.State("tenant-a", "dev-1", "mode")
-	t.Logf("输入: 整批重复上报; 判定依据: 状态不变且位点不回退, 实际 value=%q acked=%d", v2, cp2.AckedSeq)
-	if v2 != "c" || cp2.AckedSeq != 3 {
-		t.Fatalf("duplicate ingest changed state: value=%q acked=%d", v2, cp2.AckedSeq)
+	v2, _, _ := cp.State("tenant-a", "cluster-1", "dev-1", "mode")
+	t.Logf("输入: 整批重复上报; 判定依据: 状态不变且位点不回退, 实际 value=%q acked=%d", v2, cp2.Checkpoint.AckedSeq)
+	if v2 != "c" || cp2.Checkpoint.AckedSeq != 3 {
+		t.Fatalf("duplicate ingest changed state: value=%q acked=%d", v2, cp2.Checkpoint.AckedSeq)
 	}
 	_ = gw
 }
@@ -89,12 +92,12 @@ func TestDuplicateAndOutOfOrder(t *testing.T) {
 func TestConflictConvergesDeterministically(t *testing.T) {
 	cp, _, _, _, _ := newEnv(t)
 	// 同一键两个来源以相反顺序到达：高位点必须获胜，与到达顺序无关。
-	a := fleet.Telemetry{DeviceID: "dev-1", Seq: 10, Key: "config", Value: "new"}
-	b := fleet.Telemetry{DeviceID: "dev-1", Seq: 9, Key: "config", Value: "old"}
+	a := fleet.Telemetry{DeviceID: "dev-1", ClusterID: "cluster-1", Seq: 10, Key: "config", Value: "new"}
+	b := fleet.Telemetry{DeviceID: "dev-1", ClusterID: "cluster-1", Seq: 9, Key: "config", Value: "old"}
 	if _, err := cp.Ingest("tenant-a", []fleet.Telemetry{a, b}); err != nil {
 		t.Fatalf("ingest order1: %v", err)
 	}
-	v1, _, _ := cp.State("tenant-a", "dev-1", "config")
+	v1, _, _ := cp.State("tenant-a", "cluster-1", "dev-1", "config")
 	// 换设备以相反顺序重放。
 	if err := cp.RegisterDevice("tenant-a", "cluster-1", "dev-2", caps); err != nil {
 		t.Fatalf("register dev-2: %v", err)
@@ -104,7 +107,7 @@ func TestConflictConvergesDeterministically(t *testing.T) {
 	if _, err := cp.Ingest("tenant-a", []fleet.Telemetry{b2, a2}); err != nil {
 		t.Fatalf("ingest order2: %v", err)
 	}
-	v2, _, _ := cp.State("tenant-a", "dev-2", "config")
+	v2, _, _ := cp.State("tenant-a", "cluster-1", "dev-2", "config")
 	t.Logf("输入: seq10=%q 与 seq9=%q 以两种顺序到达; 判定依据: 两种顺序都应收敛到高位点值", a.Value, b.Value)
 	t.Logf("结果: 顺序[10,9]->%q 顺序[9,10]->%q", v1, v2)
 	if v1 != "new" || v2 != "new" {
@@ -125,13 +128,13 @@ func TestRestartRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
-	gw2 := edge.NewGateway("tenant-a", cp, st2)
+	gw2 := edge.NewGateway("tenant-a", "cluster-1", cp, st2)
 	gw2.SetOnline(true)
 	acked, err := gw2.Sync("dev-1")
 	if err != nil {
 		t.Fatalf("sync after restart: %v", err)
 	}
-	v, _, _ := cp.State("tenant-a", "dev-1", "k")
+	v, _, _ := cp.State("tenant-a", "cluster-1", "dev-1", "k")
 	t.Logf("输入: 断网缓冲 3 条后进程重启再重连; 判定依据: 数据不丢, acked=3 value=%q, 实际 acked=%d value=%q", "v2", acked, v)
 	if acked != 3 || v != "v2" {
 		t.Fatalf("restart lost data: acked=%d value=%q", acked, v)
@@ -178,7 +181,7 @@ func TestConcurrentReportsConsistent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("sync %s: %v", id, err)
 		}
-		v, _, _ := cp.State("tenant-a", id, "counter")
+		v, _, _ := cp.State("tenant-a", "cluster-1", id, "counter")
 		t.Logf("输入: 设备 %s 并发上报 %d 条; 判定依据: acked=%d 且 value 为最后一条 %q, 实际 value=%q",
 			id, perDev, perDev, fmt.Sprintf("%d", perDev-1), v)
 		if acked != perDev || v != fmt.Sprintf("%d", perDev-1) {

@@ -43,7 +43,7 @@ func TestDeployIdempotent(t *testing.T) {
 	if r1.Seq != r2.Seq {
 		t.Fatalf("idempotent deploy produced different seq: %d vs %d", r1.Seq, r2.Seq)
 	}
-	hist, _ := cp.History("tenant-a", "dev-1")
+	hist, _ := cp.History("tenant-a", "cluster-1", "dev-1")
 	if len(hist) != 1 {
 		t.Fatalf("expected 1 history record, got %d", len(hist))
 	}
@@ -82,18 +82,18 @@ func TestRollbackReproducible(t *testing.T) {
 			t.Fatalf("deploy %s: %v", v, err)
 		}
 	}
-	rec, err := cp.Rollback("tenant-a", "dev-1", "v1.0.0")
+	rec, err := cp.Rollback("tenant-a", "cluster-1", "dev-1", "v1.0.0")
 	if err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	cur, _ := cp.CurrentVersion("tenant-a", "dev-1")
+	cur, _ := cp.CurrentVersion("tenant-a", "cluster-1", "dev-1")
 	t.Logf("输入: 历史 v1.0.0->v1.1.0->v2.0.0, 回滚到 v1.0.0; 判定依据: 回滚记录复用历史 Spec 且当前版本为 v1.0.0")
 	t.Logf("结果: rollbackOf=%s current=%s", rec.RollbackOf, cur)
 	if cur != "v1.0.0" || rec.RollbackOf != "v1.0.0" {
 		t.Fatalf("rollback failed: current=%s record=%+v", cur, rec)
 	}
 	// 再次回滚到同一目标：结果可复现（同一目标版本、同一制品内容）。
-	rec2, err := cp.Rollback("tenant-a", "dev-1", "v1.0.0")
+	rec2, err := cp.Rollback("tenant-a", "cluster-1", "dev-1", "v1.0.0")
 	if err != nil {
 		t.Fatalf("second rollback: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestRollbackReproducible(t *testing.T) {
 		t.Fatalf("rollback not reproducible: %+v vs %+v", rec.Spec.Artifact, rec2.Spec.Artifact)
 	}
 	// 回滚到不存在的版本应报 NOT_FOUND。
-	_, err = cp.Rollback("tenant-a", "dev-1", "v9.9.9")
+	_, err = cp.Rollback("tenant-a", "cluster-1", "dev-1", "v9.9.9")
 	t.Logf("输入: 回滚到未部署过的 v9.9.9; 判定依据: 历史无此版本应 NOT_FOUND, 实际 reason=%s", fleet.ReasonOf(err))
 	if fleet.ReasonOf(err) != fleet.ReasonNotFound {
 		t.Fatalf("expected NOT_FOUND, got %v", err)
@@ -146,15 +146,24 @@ func TestConcurrentDeploysDeterministic(t *testing.T) {
 	cp := setup(t)
 	const n = 32
 	var wg sync.WaitGroup
+	recs := make([]*fleet.DeploymentRecord, n)
 	errs := make([]error, n)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			// 半数重复同一幂等键，半数各自独立键：并发下同键不得产生多条记录。
-			key := fmt.Sprintf("key-%d", i%2)
-			_, errs[i] = cp.Deploy(fleet.DeploymentSpec{TenantID: "tenant-a", ClusterID: "cluster-1",
-				DeviceID: "dev-1", Artifact: artifact("v1.0.0"), IdempotencyKey: key})
+			// 两种不同内容交替，各带不同/缺失的幂等键：
+			// 同内容无论键怎么换（含无键）都只生效一次，历史应恰为 2 条。
+			v := "v1.0.0"
+			if i%2 == 1 {
+				v = "v1.0.1"
+			}
+			key := ""
+			if i%4 >= 2 {
+				key = fmt.Sprintf("key-%d", i) // 每次都不一样，模拟重试链路换键
+			}
+			recs[i], errs[i] = cp.Deploy(fleet.DeploymentSpec{TenantID: "tenant-a", ClusterID: "cluster-1",
+				DeviceID: "dev-1", Artifact: artifact(v), IdempotencyKey: key})
 		}(i)
 	}
 	wg.Wait()
@@ -163,8 +172,8 @@ func TestConcurrentDeploysDeterministic(t *testing.T) {
 			t.Fatalf("deploy %d: %v", i, err)
 		}
 	}
-	hist, _ := cp.History("tenant-a", "dev-1")
-	t.Logf("输入: %d 并发下发、2 个幂等键; 判定依据: 历史应恰为 2 条且 Seq 唯一, 实际 %d 条", n, len(hist))
+	hist, _ := cp.History("tenant-a", "cluster-1", "dev-1")
+	t.Logf("输入: %d 并发下发、两种相同内容、幂等键缺失或各不相同; 判定依据: 内容级去重后历史应恰为 2 条且 Seq 唯一, 实际 %d 条", n, len(hist))
 	if len(hist) != 2 {
 		t.Fatalf("expected 2 records, got %d", len(hist))
 	}
@@ -175,8 +184,17 @@ func TestConcurrentDeploysDeterministic(t *testing.T) {
 		}
 		seen[h.Seq] = true
 	}
-	cur, _ := cp.CurrentVersion("tenant-a", "dev-1")
-	if cur != "v1.0.0" {
-		t.Fatalf("unexpected current version %q", cur)
+	// 同内容的所有并发响应必须是同一条首次记录（与调度顺序无关）。
+	firstSeq := map[string]int64{}
+	for i, r := range recs {
+		v := r.Spec.Artifact.Version
+		if s, ok := firstSeq[v]; ok && s != r.Seq {
+			t.Fatalf("content %q returned inconsistent seq: %d vs %d (deploy %d)", v, s, r.Seq, i)
+		}
+		firstSeq[v] = r.Seq
 	}
+	if firstSeq["v1.0.0"] == firstSeq["v1.0.1"] {
+		t.Fatalf("distinct contents collapsed to same seq %d", firstSeq["v1.0.0"])
+	}
+	t.Logf("判定依据: v1.0.0 全部返回 seq=%d, v1.0.1 全部返回 seq=%d", firstSeq["v1.0.0"], firstSeq["v1.0.1"])
 }

@@ -9,16 +9,17 @@ import (
 
 // Gateway 模拟边缘网关：断网时本地缓冲，重连后按位点续传。
 type Gateway struct {
-	mu       sync.Mutex
-	tenantID string
-	cp       *controlplane.ControlPlane
-	store    *Store
-	online   bool
+	mu        sync.Mutex
+	tenantID  string
+	clusterID string
+	cp        *controlplane.ControlPlane
+	store     *Store
+	online    bool
 }
 
 // NewGateway 创建绑定到控制面与本地存储的网关。
-func NewGateway(tenantID string, cp *controlplane.ControlPlane, store *Store) *Gateway {
-	return &Gateway{tenantID: tenantID, cp: cp, store: store, online: true}
+func NewGateway(tenantID, clusterID string, cp *controlplane.ControlPlane, store *Store) *Gateway {
+	return &Gateway{tenantID: tenantID, clusterID: clusterID, cp: cp, store: store, online: true}
 }
 
 // SetOnline 切换网关在线状态（模拟断网/重连）。
@@ -29,14 +30,16 @@ func (g *Gateway) SetOnline(online bool) {
 }
 
 // Report 接收设备遥测：始终先写入本地缓冲（保证断网不丢）；
-// 在线时立即尝试续传。
+// 在线时立即尝试续传。遥测的租户/集群身份由网关统一填充。
 func (g *Gateway) Report(t fleet.Telemetry) error {
+	g.mu.Lock()
+	t.TenantID = g.tenantID
+	t.ClusterID = g.clusterID
+	online := g.online
+	g.mu.Unlock()
 	if err := g.store.Append(t); err != nil {
 		return err
 	}
-	g.mu.Lock()
-	online := g.online
-	g.mu.Unlock()
 	if !online {
 		return nil // 断网：已缓冲，等待重连续传
 	}
@@ -58,10 +61,11 @@ func (g *Gateway) Sync(deviceID string) (uint64, error) {
 	if len(batch) == 0 {
 		return acked, nil
 	}
-	cp, err := g.cp.Ingest(g.tenantID, batch)
+	res, err := g.cp.Ingest(g.tenantID, batch)
 	if err != nil {
 		return acked, err
 	}
+	cp := res.Checkpoint
 	if cp.AckedSeq > acked {
 		if err := g.store.Ack(deviceID, cp.AckedSeq); err != nil {
 			return acked, err
