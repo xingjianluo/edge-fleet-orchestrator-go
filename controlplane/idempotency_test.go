@@ -99,14 +99,21 @@ func TestContentLevelIdempotency(t *testing.T) {
 		t.Fatalf("quota usage = %d, want 2", n)
 	}
 
-	// 再下发与历史内容一致的旧规格：仍不重复记录，且返回该内容第一次生效的记录。
+	// 再下发与某个历史版本内容完全一致、但当前并非该版本的旧规格：
+	// 这仍是内容级幂等空操作——设备不切回旧版本、不重复记录、不占额度；
+	// 返回的是设备“当前实际生效”的记录（v1.1.0 那条 r6），返回与真实状态一致。
 	r7, err := cp.Deploy(deploy("tenant-a", "cluster-1", "dev-1", "req-4", base))
 	if err != nil {
 		t.Fatalf("reissue old content: %v", err)
 	}
-	t.Logf("输入: 切到 v1.1.0 后再下发 v1.0.0 旧规格; 判定依据: 返回 v1.0.0 首次 Seq=%d 而非新建记录, 实际 Seq=%d", r1.Seq, r7.Seq)
-	if r7.Seq != r1.Seq {
-		t.Fatalf("old content seq = %d, want %d", r7.Seq, r1.Seq)
+	curAfter, _ := cp.CurrentVersion("tenant-a", "", "dev-1")
+	t.Logf("输入: 切到 v1.1.0 后再下发 v1.0.0 旧规格; 判定依据: 空操作, 返回当前生效 Seq=%d 而非旧记录 Seq=%d, 当前版本保持 %q",
+		r6.Seq, r1.Seq, curAfter)
+	if r7.Seq != r6.Seq {
+		t.Fatalf("old content seq = %d, want current seq %d", r7.Seq, r6.Seq)
+	}
+	if curAfter != "v1.1.0" {
+		t.Fatalf("reissue old content switched current version to %q", curAfter)
 	}
 	hist, _ = cp.History("tenant-a", "", "dev-1")
 	if len(hist) != 2 {

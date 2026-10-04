@@ -82,7 +82,7 @@ func TestRollbackReproducible(t *testing.T) {
 			t.Fatalf("deploy %s: %v", v, err)
 		}
 	}
-	rec, err := cp.Rollback("tenant-a", "dev-1", "v1.0.0")
+	rec, err := cp.Rollback("tenant-a", "cluster-1", "dev-1", "v1.0.0")
 	if err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestRollbackReproducible(t *testing.T) {
 		t.Fatalf("rollback failed: current=%s record=%+v", cur, rec)
 	}
 	// 再次回滚到同一目标：结果可复现（同一目标版本、同一制品内容）。
-	rec2, err := cp.Rollback("tenant-a", "dev-1", "v1.0.0")
+	rec2, err := cp.Rollback("tenant-a", "cluster-1", "dev-1", "v1.0.0")
 	if err != nil {
 		t.Fatalf("second rollback: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestRollbackReproducible(t *testing.T) {
 		t.Fatalf("rollback not reproducible: %+v vs %+v", rec.Spec.Artifact, rec2.Spec.Artifact)
 	}
 	// 回滚到不存在的版本应报 NOT_FOUND。
-	_, err = cp.Rollback("tenant-a", "dev-1", "v9.9.9")
+	_, err = cp.Rollback("tenant-a", "cluster-1", "dev-1", "v9.9.9")
 	t.Logf("输入: 回滚到未部署过的 v9.9.9; 判定依据: 历史无此版本应 NOT_FOUND, 实际 reason=%s", fleet.ReasonOf(err))
 	if fleet.ReasonOf(err) != fleet.ReasonNotFound {
 		t.Fatalf("expected NOT_FOUND, got %v", err)
