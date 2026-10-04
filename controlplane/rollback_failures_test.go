@@ -30,7 +30,7 @@ func TestRollbackIdempotent(t *testing.T) {
 	countBefore, _ := cp.DeployCount("tenant-a")
 
 	// 第一次回滚 v1.0.0：真正切换版本，追加一条 RollbackOf 记录。
-	rb1, err := cp.Rollback("tenant-a", "dev-1", "v1.0.0")
+	rb1, err := cp.Rollback("tenant-a", "cluster-1", "dev-1", "v1.0.0")
 	if err != nil {
 		t.Fatalf("rollback1: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestRollbackIdempotent(t *testing.T) {
 
 	// 第二次回滚同一目标：幂等，返回该内容第一次生效的记录（Seq=1，首次部署那条），
 	// 不增长历史、不增加额度、不改当前版本。
-	rb2, err := cp.Rollback("tenant-a", "dev-1", "v1.0.0")
+	rb2, err := cp.Rollback("tenant-a", "cluster-1", "dev-1", "v1.0.0")
 	if err != nil {
 		t.Fatalf("rollback2: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestRollbackIdempotent(t *testing.T) {
 
 	// 回滚到从未出现过的版本：NOT_FOUND，且无副作用。
 	before := len(hist)
-	_, err = cp.Rollback("tenant-a", "dev-1", "v9.9.9")
+	_, err = cp.Rollback("tenant-a", "cluster-1", "dev-1", "v9.9.9")
 	if fleet.ReasonOf(err) != fleet.ReasonNotFound {
 		t.Fatalf("missing version reason=%s", fleet.ReasonOf(err))
 	}
@@ -151,7 +151,7 @@ func TestRejectedRequestsHaveNoSideEffects(t *testing.T) {
 	t.Logf("输入: 配额耗尽后重复下发 v1.0.0; 判定依据: 成功返回 Seq=%d 且历史/额度不变", r.Seq)
 
 	// 回滚也遵守配额边界：额度满时重复回滚当前版本不占额度，必须成功且返回首次记录。
-	rb, err := cp.Rollback("tenant-a", "dev-1", "v1.0.0")
+	rb, err := cp.Rollback("tenant-a", "cluster-1", "dev-1", "v1.0.0")
 	if err != nil || rb.Seq != 1 {
 		t.Fatalf("idempotent rollback under exhausted quota: %+v %v", rb, err)
 	}
@@ -164,7 +164,7 @@ func TestRejectedRequestsHaveNoSideEffects(t *testing.T) {
 		t.Fatalf("deploy v1.0.1: %v", err)
 	}
 	cp.SetQuota("tenant-a", controlplane.Quota{MaxDevices: 1, MaxDeployments: 1})
-	_, err = cp.Rollback("tenant-a", "dev-1", "v1.0.0")
+	_, err = cp.Rollback("tenant-a", "cluster-1", "dev-1", "v1.0.0")
 	if fleet.ReasonOf(err) != fleet.ReasonQuotaExceeded {
 		t.Fatalf("rollback changing version reason=%s err=%v", fleet.ReasonOf(err), err)
 	}
